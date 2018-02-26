@@ -303,15 +303,6 @@ export default class FlowBuilder extends Component {
         link.remove()
         return this.diagramWidget.forceUpdate()
       }
-
-      // We make sure that the link was added to the node
-      const outIndex = Number(outPort.name.substr(3))
-      this.props.linkFlowNodes({
-        node: outPort.parentNode.id,
-        index: outIndex,
-        condition: outPort.parentNode.next[outIndex].condition,
-        target: targetPort.parentNode.name
-      }) // Update node that isn't selected
     })
 
     if (this.props.currentDiagramAction && this.props.currentDiagramAction.startsWith('insert_')) {
