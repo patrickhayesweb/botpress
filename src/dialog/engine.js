@@ -7,21 +7,17 @@ const callSubflowRegex = /(.+\.flow\.json)\s?@?\s?(.+)?/i // e.g. './login.flow.
 const MAX_STACK_SIZE = 100
 
 class DialogEngine {
-  constructor(flowsProvider, stateManager, options, logger = loggerShim) {
-    this.logger = logger
-    this.provider = flowsProvider
+  constructor({ flowsProvider, stateManager, notifications, options, logger = loggerShim }) {
+    Object.assign(this, { logger, flowsProvider, notifications, stateManager })
+
     this.flowsLoaded = false
     this.flows = []
-    this.stateManager = stateManager
     this.defaultFlow = _.get(options, 'defaultFlow') || 'main.flow.json'
     this.outputProcessors = []
     this.functions = {}
     this.functionMetadataProvider = null
 
-    flowsProvider.on('flowsChanged', () => {
-      this.flows = []
-      this.flowsLoaded = false
-    })
+    flowsProvider.on('flowsChanged', () => Object.assign(this, { flows: [], flowsLoaded: false }))
   }
 
   /**
@@ -34,58 +30,62 @@ class DialogEngine {
    *                                  when the flow is done processing
    */
   async processMessage(stateId, event) {
-    if (!this.flowsLoaded) {
-      await this.reloadFlows()
-    }
+    try {
+      if (!this.flowsLoaded) {
+        await this.reloadFlows()
+      }
 
-    const context = await this._getOrCreateContext(stateId)
-    let state = await this.stateManager.getState(stateId)
+      const context = await this._getOrCreateContext(stateId)
+      let state = await this.stateManager.getState(stateId)
 
-    if (event.type === 'bp_dialog_timeout') {
-      state = await this._processTimeout(stateId, state, context, event)
+      if (event.type === 'bp_dialog_timeout') {
+        state = await this._processTimeout(stateId, state, context, event)
+
+        if (!_.isNil(state)) {
+          await this.stateManager.setState(stateId, state)
+        }
+
+        return state
+      }
+
+      const msg = (event.text || '').substr(0, 20)
+      this._trace('<~', 'RECV', `"${msg}"`, context, state)
+
+      if (!context.currentFlow) {
+        throw new Error('Expected currentFlow to be defined for stateId=' + stateId)
+      }
+
+      const catchAllOnReceive = _.get(context, 'currentFlow.catchAll.onReceive')
+
+      if (catchAllOnReceive) {
+        this._trace('!!', 'KALL', '', context, state)
+        state = await this._processInstructions(catchAllOnReceive, state, event, context)
+      }
+
+      // If there's a 'next' defined in catchAll, this will try to match any condition and if it is matched it
+      // will run the node defined in the next instead of the current context node
+      const catchAllNext = _.get(context, 'currentFlow.catchAll.next')
+      if (catchAllNext) {
+        this._trace('..', 'KALL', '', context, state)
+        for (let i = 0; i < catchAllNext.length; i++) {
+          if (await this._evaluateCondition(catchAllNext[i].condition, state, event)) {
+            return this._processNode(stateId, state, context, catchAllNext[i].node, event)
+          }
+        }
+
+        this._trace('?X', 'KALL', '', context, state)
+      }
+
+      state = await this._processNode(stateId, state, context, context.node, event)
 
       if (!_.isNil(state)) {
         await this.stateManager.setState(stateId, state)
       }
 
       return state
+    } catch (e) {
+      this.notifications.create({ message: e.message, level: 'error', redirectUrl: '/logs' })
     }
-
-    const msg = (event.text || '').substr(0, 20)
-    this._trace('<~', 'RECV', `"${msg}"`, context, state)
-
-    if (!context.currentFlow) {
-      throw new Error('Expected currentFlow to be defined for stateId=' + stateId)
-    }
-
-    const catchAllOnReceive = _.get(context, 'currentFlow.catchAll.onReceive')
-
-    if (catchAllOnReceive) {
-      this._trace('!!', 'KALL', '', context, state)
-      state = await this._processInstructions(catchAllOnReceive, state, event, context)
-    }
-
-    // If there's a 'next' defined in catchAll, this will try to match any condition and if it is matched it
-    // will run the node defined in the next instead of the current context node
-    const catchAllNext = _.get(context, 'currentFlow.catchAll.next')
-    if (catchAllNext) {
-      this._trace('..', 'KALL', '', context, state)
-      for (let i = 0; i < catchAllNext.length; i++) {
-        if (await this._evaluateCondition(catchAllNext[i].condition, state, event)) {
-          return this._processNode(stateId, state, context, catchAllNext[i].node, event)
-        }
-      }
-
-      this._trace('?X', 'KALL', '', context, state)
-    }
-
-    state = await this._processNode(stateId, state, context, context.node, event)
-
-    if (!_.isNil(state)) {
-      await this.stateManager.setState(stateId, state)
-    }
-
-    return state
   }
 
   async reloadFlows() {
@@ -469,7 +469,7 @@ class DialogEngine {
             return value
           })
         } catch (err) {
-          this._trace('ERROR function has invalid arguments (not a valid JSON string): ' + argsStr)
+          throw new Error('ERROR function has invalid arguments (not a valid JSON string): ' + argsStr)
         }
       } else {
         name = instruction
@@ -498,7 +498,7 @@ class DialogEngine {
           }
         }
       } catch (err) {
-        this._trace(`ERROR function "${name}" thrown an error: ${err && err.message}`, context, userState)
+        throw new Error(`ERROR function "${name}" thrown an error: ${err && err.message}`)
       }
     }
 
@@ -526,8 +526,7 @@ class DialogEngine {
     try {
       return (await vm.run(condition)) == true
     } catch (err) {
-      this._trace(`ERROR evaluating condition "${condition}": ${err.message}`, null, userState)
-      return false
+      throw new Error(`ERROR evaluating condition "${condition}": ${err.message}`)
     }
   }
 
