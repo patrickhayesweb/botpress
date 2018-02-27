@@ -109,11 +109,12 @@ class UploadWidget extends Component {
               </InputGroup>
             </FormGroup>
           )}
-        {error && (
-          <FormGroup validationState="error">
-            <HelpBlock>{error}</HelpBlock>
-          </FormGroup>
-        )}
+        {expanded &&
+          error && (
+            <FormGroup validationState="error">
+              <HelpBlock>{error}</HelpBlock>
+            </FormGroup>
+          )}
         {expanded && uploading && <Loading />}
       </div>
     )
